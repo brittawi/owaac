@@ -824,8 +824,7 @@ def run_pipeline(args,read_img_filenames, read_visible_masks_filenames):
     total_processing_time = 0.0
     image_count = 0  # Counter for images processed
     
-    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    device = args.device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     transform_classes = get_transform(image_size=384)
     
     # Load ram_plus model
