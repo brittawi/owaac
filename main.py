@@ -102,8 +102,10 @@ def parse_args():
     parser.add_argument('--instaorder_ckpt',   type=str,  default="InstaOrder/InstaOrder_ckpt/InstaOrder_InstaOrderNet_od.pth.tar")
     
     # LaMa: configuration and checkpoint paths (not used currently, but kept for future use)
-    parser.add_argument('--lama_config_path',  type=str,  default="lama/big-lama/config.yaml")
-    parser.add_argument('--lama_ckpt_path',    type=str,  default="lama/big-lama/models/best.ckpt")
+    # parser.add_argument('--lama_config_path',  type=str,  default="../lama/big-lama/config.yaml")
+    # parser.add_argument('--lama_ckpt_path',    type=str,  default="../lama/big-lama/models/best.ckpt")
+    parser.add_argument('--lama_config_path',  type=str,  default=None)
+    parser.add_argument('--lama_ckpt_path',    type=str,  default=None)
     
     parser.add_argument('--save_interm',       type=bool, default=True, help='Whether to save intermediate images')
     parser.add_argument('--max_iter_id',       type=int,  default=3,    help='Maximum number of pipeline iterations')
@@ -147,7 +149,8 @@ def load_models(gdino_config, gdino_ckpt, instaorder_ckpt=None, lama_config_path
     loaded_models.append(gdino_model)
 
     sd_inpaint_model = StableDiffusionInpaintPipeline.from_pretrained(
-        "stabilityai/stable-diffusion-2-inpainting",
+        #"stabilityai/stable-diffusion-2-inpainting",
+        "sd2-community/stable-diffusion-2-inpainting",
         torch_dtype=torch.float16,
     )
     sd_inpaint_model.enable_attention_slicing()
@@ -798,8 +801,8 @@ def remove_duplicates(input_list):
             result.append(item)
     return result
 
-
-def run_pipeline(args,read_img_filenames, range_len, round_number):
+# added visible masks
+def run_pipeline(args,read_img_filenames, read_visible_masks_filenames):
     gdino_model, sd_inpaint_model, instaorder_model, lama_model = load_models(
         args.gdino_config, args.gdino_ckpt, args.instaorder_ckpt, args.lama_config_path, args.lama_ckpt_path)
 
@@ -820,8 +823,9 @@ def run_pipeline(args,read_img_filenames, range_len, round_number):
     # Initialize a variable to store total processing time excluding the specified part
     total_processing_time = 0.0
     image_count = 0  # Counter for images processed
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = args.device
     transform_classes = get_transform(image_size=384)
     
     # Load ram_plus model
@@ -835,7 +839,7 @@ def run_pipeline(args,read_img_filenames, range_len, round_number):
     clip_model, clip_preprocess = clip.load('ViT-B/32', device)
 
     # Iterate over each image filename
-    for img_filename in tqdm(img_filenames, desc="Iterate images"):
+    for i, img_filename in enumerate(tqdm(img_filenames, desc="Iterate images")):
         print('img_filename:', img_filename)
         start_time = time.time()  # Start timer before processing an image
         # Extract the base name from the image file path
@@ -878,40 +882,50 @@ def run_pipeline(args,read_img_filenames, range_len, round_number):
 
         args.text_query = imgname_prompt_map[img_basename]
 
+        # skip LISA as we already have the visible masks
         # run the VLM, LISA 
-        client = Client(LISA_SERVER_URL)   ### change ip from "Running on local URL..."
-        print("query text:", args.text_query)
-        print('img_path:',img_path)
-        resultclient = client.predict(
-                        args.text_query,	# str in 'Text Instruction' Textbox component
-                        img_path, #"https://raw.githubusercontent.com/gradio-app/gradio/main/test/test_files/bus.png",	# str (filepath on your computer (or URL) of image) in 'Input Image' Image component
-                        api_name="/predict"
-        )
+        # client = Client(LISA_SERVER_URL)   ### change ip from "Running on local URL..."
+        # print("query text:", args.text_query)
+        # print('img_path:',img_path)
+        # resultclient = client.predict(
+        #                 args.text_query,	# str in 'Text Instruction' Textbox component
+        #                 img_path, #"https://raw.githubusercontent.com/gradio-app/gradio/main/test/test_files/bus.png",	# str (filepath on your computer (or URL) of image) in 'Input Image' Image component
+        #                 api_name="/predict"
+        # )
         
-        # Opening JSON file
-        file_from_json = open(resultclient[1])
-        # returns JSON object as a dictionary
-        pre_maskdata = json.load(file_from_json)
+        # # Opening JSON file
+        # file_from_json = open(resultclient[1])
+        # # returns JSON object as a dictionary
+        # pre_maskdata = json.load(file_from_json)
         
-        visible_seg_path = f"{output_img_dir}/visible_seg.png"
-        # Save the VLM segmentation result
-        shutil.copyfile(resultclient[0], visible_seg_path)
+        # visible_seg_path = f"{output_img_dir}/visible_seg.png"
+        # # Save the VLM segmentation result
+        # shutil.copyfile(resultclient[0], visible_seg_path)
 
-        # IF the VLM segmentation result is empty, then skip the image
-        if not os.path.exists(visible_seg_path):
-            print("Visible mask not found, skipping image")
-            continue
+        # # IF the VLM segmentation result is empty, then skip the image
+        # if not os.path.exists(visible_seg_path):
+        #     print("Visible mask not found, skipping image")
+        #     continue
         
-        pickle_path = LISA_OUTPUT_PATH +img_filename.split('.')[0]+'.pl'
-        print('pickle_path:',pickle_path)
-        file_open=open(pickle_path,'wb')
-        pickle.dump(np.array(pre_maskdata['data']),file_open)
-        file_open.close()
+        # pickle_path = LISA_OUTPUT_PATH +img_filename.split('.')[0]+'.pl'
+        # print('pickle_path:',pickle_path)
+        # file_open=open(pickle_path,'wb')
+        # pickle.dump(np.array(pre_maskdata['data']),file_open)
+        # file_open.close()
 
 
-        #Use Clip to decide inpaint prompt 
-        # Assuming pre_maskdata['data'] contains 0s and 1s, where 1s indicate the mask regions
-        pre_maskdata_npmask = np.array(pre_maskdata['data'], dtype=bool)
+        # #Use Clip to decide inpaint prompt 
+        # # Assuming pre_maskdata['data'] contains 0s and 1s, where 1s indicate the mask regions
+        # pre_maskdata_npmask = np.array(pre_maskdata['data'], dtype=bool)
+        
+        # load mask instead
+        mask_path = read_visible_masks_filenames[i]
+        mask_name = os.path.basename(mask_path)
+        img_name = os.path.basename(img_filename)
+        if mask_name != img_name:
+            raise ValueError(f"Mask name: {mask_name} does not equal image name: {img_name}")
+        pre_maskdata_npmask = np.asarray(Image.open(mask_path).convert("L"))
+        pre_maskdata_npmask = (pre_maskdata_npmask > 0).astype(np.uint8)
         target_image_np = np.array(img_pil)
 
         # Apply the mask to each color channel
@@ -932,8 +946,10 @@ def run_pipeline(args,read_img_filenames, range_len, round_number):
             print("No object masks detected, skipping image") 
             continue  # If no masks are detected, then proceed to the next image
 
-        query_obj = QueryObject(img_path, img, img_pil, len(masks), np.array(pre_maskdata['data']), output_img_dir)
-        masks = np.append(masks, [np.array(pre_maskdata['data'])], axis=0)
+        #query_obj = QueryObject(img_path, img, img_pil, len(masks), np.array(pre_maskdata['data']), output_img_dir)
+        query_obj = QueryObject(img_path, img, img_pil, len(masks), pre_maskdata_npmask, output_img_dir)
+        #masks = np.append(masks, [np.array(pre_maskdata['data'])], axis=0)
+        masks = np.append(masks, [pre_maskdata_npmask], axis=0)
         select_class_name = args.inpaint_prompt
         class_names.append(select_class_name)   # class name of the query object
         pred_scores.append(float(1))
@@ -1233,6 +1249,9 @@ def clean_up_intermediate_results(output_img_dir):
 if __name__ == '__main__':
     args = parse_args()
     read_img_filenames = read_txt(args.img_filenames_txt)
-    round_number = 5
-    print('current img files:', read_img_filenames[args.line_num:args.line_num+round_number])
-    run_pipeline(args,read_img_filenames[args.line_num:args.line_num+round_number],args.line_num,round_number)
+    read_visible_masks_filenames = read_txt(args.read_visible_masks_filenames)
+    #round_number = 5
+    # print('current img files:', read_img_filenames[args.line_num:args.line_num+round_number])
+    print('current img files:', read_img_filenames)
+    # run_pipeline(args,read_img_filenames[args.line_num:args.line_num+round_number],args.line_num,round_number)
+    run_pipeline(args,read_img_filenames,read_visible_masks_filenames)
