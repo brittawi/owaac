@@ -33,20 +33,25 @@ from PIL import Image, ImageFilter, ImageChops, ImageOps
 from gradio_client import Client
 from diffusers import StableDiffusionInpaintPipeline
 from omegaconf import OmegaConf
-from saicinpainting.training.trainers import load_checkpoint
-from lama.bin.predict_for_mc import *
+#from saicinpainting.training.trainers import load_checkpoint
+#from lama.bin.predict_for_mc import *
 import clip
 
 # InstaOrder
 # https://github.com/POSTECH-CVLab/InstaOrder
-sys.path.append('InstaOrder')
-import models
+base_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+instaorder_root = os.path.abspath(os.path.join(base_dir, "..", "InstaOrder"))
+sys.path.insert(0, instaorder_root)
+
+if "models" in sys.modules:
+    del sys.modules["models"]
+from models.supervised_order import InstaOrderNet_od
 import inference as infer
 
 # Grounding DINO
 # https://github.com/IDEA-Research/GroundingDINO
-sys.path.append("Grounded-Segment-Anything")
-sys.path.append("Grounded-Segment-Anything/GroundingDINO")
+sys.path.append("../Grounded-Segment-Anything")
+sys.path.append("../Grounded-Segment-Anything/GroundingDINO")
 import GroundingDINO.groundingdino.datasets.transforms as T
 from GroundingDINO.groundingdino.models import build_model
 from GroundingDINO.groundingdino.util.slconfig import SLConfig
@@ -175,22 +180,25 @@ def load_models(gdino_config, gdino_ckpt, instaorder_ckpt=None, lama_config_path
             'backbone_param': {'in_channels': 5, 'num_classes': [2, 3]},
             'overlap_weight': 0.1, 'distinct_weight': 0.9
         }
-        instaorder_model = models.__dict__['InstaOrderNet_od'](instaorder_model_params)
+        #instaorder_model = models.__dict__['InstaOrderNet_od'](instaorder_model_params)
+        instaorder_model = InstaOrderNet_od(instaorder_model_params)
         instaorder_model.load_state(instaorder_ckpt)
         instaorder_model.switch_to('eval')
         loaded_models.append(instaorder_model)
 
+    # Quickfix for lama model
     # Note: LaMa is not used in the current pipeline, but it remains available for future extensions.
-    if lama_config_path is not None and lama_ckpt_path is not None:
-        with open(lama_config_path, 'r') as f:
-            train_config = OmegaConf.create(yaml.safe_load(f))
-        train_config.training_model.predict_only = True
-        train_config.visualizer.kind = 'noop'
+    # if lama_config_path is not None and lama_ckpt_path is not None:
+    #     with open(lama_config_path, 'r') as f:
+    #         train_config = OmegaConf.create(yaml.safe_load(f))
+    #     train_config.training_model.predict_only = True
+    #     train_config.visualizer.kind = 'noop'
 
-        lama_model = load_checkpoint(train_config, lama_ckpt_path, strict=False, map_location='cpu')
-        lama_model.freeze()
-        lama_model.to(device)
-        loaded_models.append(lama_model)
+    #     lama_model = load_checkpoint(train_config, lama_ckpt_path, strict=False, map_location='cpu')
+    #     lama_model.freeze()
+    #     lama_model.to(device)
+    #     loaded_models.append(lama_model)
+    loaded_models.append(None)
 
     return loaded_models
 
@@ -918,7 +926,7 @@ def run_pipeline(args,read_img_filenames, read_visible_masks_filenames):
         # pre_maskdata_npmask = np.array(pre_maskdata['data'], dtype=bool)
         
         # load mask instead
-        mask_path = read_visible_masks_filenames[i]
+        mask_path = os.path.join(args.input_dir, read_visible_masks_filenames[i])
         mask_name = os.path.basename(mask_path)
         img_name = os.path.basename(img_filename)
         if mask_name != img_name:
