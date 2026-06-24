@@ -50,8 +50,8 @@ import inference as infer
 
 # Grounding DINO
 # https://github.com/IDEA-Research/GroundingDINO
-sys.path.append("../Grounded-Segment-Anything")
-sys.path.append("../Grounded-Segment-Anything/GroundingDINO")
+sys.path.append("external/Grounded-Segment-Anything")
+sys.path.append("external/Grounded-Segment-Anything/GroundingDINO")
 import GroundingDINO.groundingdino.datasets.transforms as T
 from GroundingDINO.groundingdino.models import build_model
 from GroundingDINO.groundingdino.util.slconfig import SLConfig
@@ -320,6 +320,8 @@ def check_valid_query(
     query_class = class_names[mask_id]
     pred_score = pred_scores[mask_id]
     if pred_score < query_pred_score_thresh or query_mask.sum() < query_mask_size_thresh * img.shape[0] * img.shape[1]: 
+        print(f"Query prediction score", pred_score, "thresh",query_pred_score_thresh)
+        print("query mask sum", query_mask.sum(), "thresh", query_mask_size_thresh * img.shape[0] * img.shape[1])
         print(f"Query object {query_class} {mask_id} does not meet the minimum score threshold or size threshold, skipping")
         return
 
@@ -810,9 +812,14 @@ def remove_duplicates(input_list):
     return result
 
 # added visible masks
+# input should be sample which contains
+#   - sample.image_np
+#   - sample.modal_mask_np
+#   - sample.category
 def run_pipeline(args,read_img_filenames, read_visible_masks_filenames):
-    gdino_model, sd_inpaint_model, instaorder_model, lama_model = load_models(
-        args.gdino_config, args.gdino_ckpt, args.instaorder_ckpt, args.lama_config_path, args.lama_ckpt_path)
+    # perform this outside of this loop
+    # gdino_model, sd_inpaint_model, instaorder_model, lama_model = load_models(
+    #     args.gdino_config, args.gdino_ckpt, args.instaorder_ckpt, args.lama_config_path, args.lama_ckpt_path)
 
     img_filenames = read_img_filenames
 
@@ -1088,7 +1095,7 @@ def img_blend(amodal_completions_masked_dir, mask_id):
     amodal_completions_dir = '/'.join(amodal_completions_masked_dir.split('/')[:-1]) 
 
     # Blend the amodal completion RGBA image with the original RGBA image
-    visible_obj_img_path = os.path.join(PROJECT_PATH, amodal_completions_dir, f'sd_img_cut.png')       
+    visible_obj_img_path = os.path.join(amodal_completions_dir, f'sd_img_cut.png')       
     inpainted_img_path = os.path.join(amodal_completions_masked_dir, f'_{mask_id}.png')
 
     # Load the images as RGBA
@@ -1103,7 +1110,7 @@ def img_blend(amodal_completions_masked_dir, mask_id):
  
     blended_img = alpha_blending(shrink_edges_to_transparent(src_im), dst_im)
 
-    blended_img_path = os.path.join(PROJECT_PATH, amodal_completions_dir, f'amodal_completion.png')
+    blended_img_path = os.path.join(amodal_completions_dir, f'amodal_completion.png')
     cv2.imwrite(blended_img_path, blended_img)
 
     # Load the images
