@@ -319,13 +319,16 @@ def check_valid_query(
     query_mask = query_mask.astype(np.uint8)
     query_class = class_names[mask_id]
     pred_score = pred_scores[mask_id]
-    if pred_score < query_pred_score_thresh or query_mask.sum() < query_mask_size_thresh * img.shape[0] * img.shape[1]: 
-        print(f"Query prediction score", pred_score, "thresh",query_pred_score_thresh)
-        print("query mask sum", query_mask.sum(), "thresh", query_mask_size_thresh * img.shape[0] * img.shape[1])
-        print(f"Query object {query_class} {mask_id} does not meet the minimum score threshold or size threshold, skipping")
-        return
+    # TODO 
+    # if pred_score < query_pred_score_thresh or query_mask.sum() < query_mask_size_thresh * img.shape[0] * img.shape[1]: 
+    #     print(f"Query prediction score", pred_score, "thresh",query_pred_score_thresh)
+    #     print("query mask sum", query_mask.sum(), "thresh", query_mask_size_thresh * img.shape[0] * img.shape[1])
+    #     print(f"Query object {query_class} {mask_id} does not meet the minimum score threshold or size threshold, skipping")
+    #     return
 
-    if query_class not in classes: return
+    if query_class not in classes:
+        print(f"query class {query_class} not in classes {classes}") 
+        return
 
     return query_mask, query_class
 
