@@ -319,7 +319,7 @@ def check_valid_query(
     query_mask = query_mask.astype(np.uint8)
     query_class = class_names[mask_id]
     pred_score = pred_scores[mask_id]
-    # TODO 
+    # TODO => here the threshold is set!
     # if pred_score < query_pred_score_thresh or query_mask.sum() < query_mask_size_thresh * img.shape[0] * img.shape[1]: 
     #     print(f"Query prediction score", pred_score, "thresh",query_pred_score_thresh)
     #     print("query mask sum", query_mask.sum(), "thresh", query_mask_size_thresh * img.shape[0] * img.shape[1])
