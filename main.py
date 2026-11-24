@@ -67,6 +67,330 @@ from ram.models import ram_plus
 from ram import inference_ram as inference
 from ram import get_transform
 
+#---------------ADDED-------------'
+# REPRODUCIBILITY CHANGE: Stable, cross-process seed derivation.
+import hashlib
+
+def get_iteration_seed(base_seed, sample_id, iteration):
+    key = f"{base_seed}:{sample_id}:{iteration}".encode("utf-8")
+
+    return int.from_bytes(
+        hashlib.sha256(key).digest()[:4],
+        byteorder="little",
+    )
+    
+def array_hash(x):
+    arr = np.ascontiguousarray(np.asarray(x))
+    return hashlib.sha256(arr.tobytes()).hexdigest()[:16]
+
+def tensor_hash(tensor):
+    arr = tensor.detach().cpu().contiguous().numpy()
+    return hashlib.sha256(arr.tobytes()).hexdigest()[:16]
+
+
+def test_unet_determinism(pipe):
+    unet = pipe.unet
+    unet.eval()
+
+    device = next(unet.parameters()).device
+    dtype = next(unet.parameters()).dtype
+
+    # SD2 inpainting UNet expects 9 input channels
+    generator = torch.Generator("cpu").manual_seed(42)
+
+    sample = torch.randn(
+        (1, unet.config.in_channels, 64, 64),
+        generator=generator,
+        dtype=torch.float16,
+    ).to(device=device, dtype=dtype)
+
+    # SD2 text conditioning typically has 1024 features
+    encoder_hidden_states = torch.randn(
+        (1, 77, unet.config.cross_attention_dim),
+        generator=generator,
+        dtype=torch.float32,
+    ).to(device=device, dtype=dtype)
+
+    timestep = torch.tensor(500, device=device)
+
+    with torch.inference_mode():
+        output = unet(
+            sample,
+            timestep,
+            encoder_hidden_states=encoder_hidden_states,
+        ).sample
+
+    print("UNet output hash:", tensor_hash(output))
+
+
+def register_unet_output_debug(pipe):
+    state = {"calls": 0}
+
+    def hook(module, inputs, output):
+        noise_pred = (
+            output[0]
+            if isinstance(output, (tuple, list))
+            else output.sample
+        )
+
+        call_idx = state["calls"]
+
+        print(
+            f"[UNET CALL {call_idx}] "
+            f"output_hash={tensor_hash(noise_pred)}",
+            flush=True,
+        )
+
+        state["calls"] += 1
+
+    return pipe.unet.register_forward_hook(hook)
+    
+def register_unet_input_debug(pipe):
+    state = {"calls": 0}
+
+    def hook(module, args):
+        if state["calls"] == 0:
+            x = args[0]
+
+            print(
+                "[UNET INPUT]",
+                "shape:", tuple(x.shape),
+                "full:", tensor_hash(x),
+                "noise:", tensor_hash(x[:, :4]),
+                "mask:", tensor_hash(x[:, 4:5]),
+                "masked_image_latents:", tensor_hash(x[:, 5:9]),
+                flush=True,
+            )
+
+        state["calls"] += 1
+
+    return pipe.unet.register_forward_pre_hook(hook)
+
+def debug_callback(pipe, step_index, timestep, callback_kwargs):
+    latents = callback_kwargs["latents"]
+
+    print(
+        f"[SD STEP {step_index}] "
+        f"timestep={timestep} "
+        f"latent_hash={tensor_hash(latents)}",
+        flush=True,
+    )
+
+    return callback_kwargs
+
+def register_unet_layer_debug(pipe):
+    handles = []
+    state = {"calls": 0}
+
+    layers = {
+        "conv_in": pipe.unet.conv_in,
+        "down_block_0": pipe.unet.down_blocks[0],
+        "down_block_1": pipe.unet.down_blocks[1],
+        "mid_block": pipe.unet.mid_block,
+        "up_block_0": pipe.unet.up_blocks[0],
+        "conv_out": pipe.unet.conv_out,
+    }
+
+    def make_hook(name):
+        def hook(module, inputs, output):
+            # Only inspect the first UNet forward pass
+            if state["calls"] > 0:
+                return
+
+            if isinstance(output, (tuple, list)):
+                tensor = output[0]
+            else:
+                tensor = output
+
+            print(
+                f"[UNET LAYER] {name}: "
+                f"{tensor_hash(tensor)}",
+                flush=True,
+            )
+
+        return hook
+
+    for name, layer in layers.items():
+        handles.append(
+            layer.register_forward_hook(make_hook(name))
+        )
+
+    def count_calls(module, inputs, output):
+        state["calls"] += 1
+
+    handles.append(
+        pipe.unet.register_forward_hook(count_calls)
+    )
+
+    return handles
+
+def register_unet_debug(pipe):
+    state = {"calls": 0}
+
+    def hook(module, args, kwargs):
+        if state["calls"] == 0:
+            x = args[0]
+
+            print(
+                "[UNET INPUT]",
+                "shape:", tuple(x.shape),
+                "full:", tensor_hash(x),
+                "noise:", tensor_hash(x[:, :4]),
+                "mask:", tensor_hash(x[:, 4:5]),
+                "masked_image_latents:", tensor_hash(x[:, 5:9]),
+                flush=True,
+            )
+
+            embeddings = kwargs.get("encoder_hidden_states")
+
+            if embeddings is not None:
+                print(
+                    "[TEXT EMBEDDINGS]",
+                    tensor_hash(embeddings),
+                    flush=True,
+                )
+
+        state["calls"] += 1
+
+    return pipe.unet.register_forward_pre_hook(
+        hook,
+        with_kwargs=True,
+    )
+    
+
+def register_vae_debug(pipe, generator):
+    original_encode = pipe.vae.encode
+
+    def debug_encode(*args, **kwargs):
+        # Hash the actual tensor entering the VAE
+        image = args[0]
+        
+        torch.save(
+            image.detach().cpu(),
+            "tmp/owaac_vae_input.pt",
+        )
+
+        print(
+            "[VAE INPUT]",
+            tensor_hash(image),
+            flush=True,
+        )
+
+        # Run the original VAE encoder
+        result = original_encode(*args, **kwargs)
+
+        if hasattr(result, "latent_dist"):
+            dist = result.latent_dist
+
+            print(
+                "[VAE POSTERIOR]",
+                "mean:", tensor_hash(dist.mean),
+                "logvar:", tensor_hash(dist.logvar),
+                flush=True,
+            )
+
+        # Check generator state at VAE encoding
+        print(
+            "[VAE GENERATOR STATE]",
+            tensor_hash(generator.get_state()),
+            flush=True,
+        )
+
+        return result
+
+    pipe.vae.encode = debug_encode
+
+    def restore():
+        pipe.vae.encode = original_encode
+
+    return restore
+
+def test_actual_vae_input(pipe):
+    vae = pipe.vae
+    vae.eval()
+
+    device = next(vae.parameters()).device
+    dtype = next(vae.parameters()).dtype
+
+    x = torch.load(
+        "/tmp/owaac_vae_input.pt",
+        map_location="cpu",
+        weights_only=True,
+    ).to(device=device, dtype=dtype)
+
+    means = []
+
+    with torch.inference_mode():
+        for i in range(5):
+            posterior = vae.encode(x).latent_dist
+            means.append(posterior.mean.detach().clone())
+
+    for i in range(1, len(means)):
+        diff = (
+            means[0].float() - means[i].float()
+        ).abs()
+
+        print(
+            f"Run {i}: "
+            f"equal={torch.equal(means[0], means[i])}, "
+            f"max_diff={diff.max().item()}, "
+            f"mean_diff={diff.mean().item()}"
+        )
+
+def test_vae_determinism(pipe):
+    vae = pipe.vae
+    vae.eval()
+
+    device = next(vae.parameters()).device
+    dtype = next(vae.parameters()).dtype
+
+    generator = torch.Generator("cpu").manual_seed(42)
+
+    # Fixed input tensor
+    x = torch.randn(
+        (1, 3, 512, 512),
+        generator=generator,
+        dtype=torch.float32,
+    ).to(device=device, dtype=dtype)
+
+    with torch.inference_mode():
+        result1 = vae.encode(x).latent_dist
+        result2 = vae.encode(x).latent_dist
+
+    mean1 = result1.mean.detach().float().cpu()
+    mean2 = result2.mean.detach().float().cpu()
+
+    logvar1 = result1.logvar.detach().float().cpu()
+    logvar2 = result2.logvar.detach().float().cpu()
+
+    print("VAE mean identical:", torch.equal(mean1, mean2))
+    print("VAE logvar identical:", torch.equal(logvar1, logvar2))
+
+    print(
+        "VAE mean max difference:",
+        (mean1 - mean2).abs().max().item()
+    )
+    print(
+        "VAE logvar max difference:",
+        (logvar1 - logvar2).abs().max().item()
+    )
+    
+def hash_model_weights(model):
+    h = hashlib.sha256()
+
+    for name, tensor in sorted(model.state_dict().items()):
+        h.update(name.encode("utf-8"))
+        h.update(
+            tensor.detach()
+            .cpu()
+            .contiguous()
+            .numpy()
+            .tobytes()
+        )
+
+    return h.hexdigest()[:16]
+
+
 # Global paths for customization
 LISA_SERVER_URL = "http://127.0.0.1:7860/"  # Modify LISA server URL here, use the URL from "Running on local URL..."
 PROJECT_PATH = "/your/path/here/"  # Modify Hugging Face cache path here
@@ -156,11 +480,39 @@ def load_models(gdino_config, gdino_ckpt, instaorder_ckpt=None, lama_config_path
     sd_inpaint_model = StableDiffusionInpaintPipeline.from_pretrained(
         #"stabilityai/stable-diffusion-2-inpainting",
         "sd2-community/stable-diffusion-2-inpainting",
-        torch_dtype=torch.float16,
+        torch_dtype=torch.float32,
     )
     sd_inpaint_model.enable_attention_slicing()
     sd_inpaint_model = sd_inpaint_model.to("cuda")
+    print("UNet dtype:", sd_inpaint_model.unet.dtype)
+    print("VAE dtype:", sd_inpaint_model.vae.dtype)
+    print(
+        "VAE attention processors:",
+        set(
+            type(p).__name__
+            for p in sd_inpaint_model.vae.attn_processors.values()
+        ),
+    )
+    print(
+        "[VAE WEIGHTS]",
+        hash_model_weights(sd_inpaint_model.vae),
+        flush=True,
+    )
+    print(
+        "[UNET WEIGHTS AFTER LOAD]",
+        hash_model_weights(sd_inpaint_model.unet),
+        flush=True,
+    )
     loaded_models.append(sd_inpaint_model)
+    print(
+    set(
+        type(p).__name__
+        for p in sd_inpaint_model.vae.attn_processors.values()
+    ))
+    
+    test_vae_determinism(sd_inpaint_model)
+    
+    test_actual_vae_input(sd_inpaint_model)
 
     # InstaOrder, default parameters from InstaOrderNet_od
     # https://github.com/POSTECH-CVLab/InstaOrder/blob/dd88eceea300f60722b763f66335ca0099007aea/experiments/InstaOrder/InstaOrderNet_od/config.yaml
@@ -641,6 +993,7 @@ def run_iteration(
     mc_clean_bkgd_img,
     sd_target_size=512,
     save_interm=True,  # Whether to save intermediate images
+    seed=None, # ADDED for reproducibility
 ):
     """
     Returns whether to run an additional iteration
@@ -768,13 +1121,69 @@ def run_iteration(
     sd_img = Image.fromarray(sd_img_syn).convert("RGB").resize((sd_target_size, sd_target_size), resample=Image.LANCZOS)
     sd_occ_mask = Image.fromarray(255 * sd_occ_mask).convert("L").resize((sd_target_size, sd_target_size), resample=Image.NEAREST)
 
+    # added generator for reproducibility
+    generator = None
 
-    with torch.no_grad():
-        amodal_completion = sd_inpaint_model(
-            image=sd_img,
-            mask_image=sd_occ_mask,
-            prompt=sd_prompt,
-        ).images[0]
+    if seed is not None:
+        iteration_seed = get_iteration_seed(
+            seed,
+            query_obj.img_path,
+            query_obj.iter_id,
+        )
+
+        generator = torch.Generator("cpu").manual_seed(iteration_seed)
+        
+        # input_handle = register_unet_input_debug(sd_inpaint_model)
+        # output_handle = register_unet_output_debug(sd_inpaint_model)
+
+        # restore_vae = register_vae_debug(
+        #     sd_inpaint_model,
+        #     generator,
+        # )
+        
+        handles = register_unet_layer_debug(sd_inpaint_model)
+        
+        print(
+            "[VAE WEIGHTS BEFORE SD]",
+            hash_model_weights(sd_inpaint_model.vae),
+        )
+        print(
+            "[UNET WEIGHTS BEFORE SD]",
+            hash_model_weights(sd_inpaint_model.unet),
+            flush=True,
+        )
+
+        try:
+            with torch.no_grad():
+                amodal_completion = sd_inpaint_model(
+                    image=sd_img,
+                    mask_image=sd_occ_mask,
+                    prompt=sd_prompt,
+                    generator=generator,
+                    # callback_on_step_end=debug_callback,
+                    # callback_on_step_end_tensor_inputs=["latents"],
+                ).images[0]
+        finally:
+            # restore_vae()
+            # input_handle.remove()
+            # output_handle.remove()
+            for handle in handles:
+                handle.remove()
+            
+    
+    # debug_path = f"debug/one/{query_obj.img_path}_iteration_{query_obj.iter_id}.png"  
+    # print("debug", debug_path)
+    # amodal_completion.save(
+    #     debug_path
+    # )
+        
+    print(
+        "[OWAAC SD OUTPUT]",
+        "sample:", query_obj.img_path,
+        "iteration:", query_obj.iter_id,
+        "hash:", array_hash(amodal_completion),
+        flush=True,
+    )
 
     query_obj.iter_id += 1
     amodal_completion = amodal_completion.resize((input_width, input_height))
